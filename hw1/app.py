@@ -1,6 +1,8 @@
 import json
 from typing import Any, Awaitable, Callable, List
 
+#hello ci cd
+
 async def send_json_response(
     send : Callable[[dict[str,Any]],Awaitable[None]], # корутина
     status_code : int,                                # статус ответа 
