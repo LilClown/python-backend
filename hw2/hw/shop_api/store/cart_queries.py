@@ -89,7 +89,6 @@ def patch(id: int, patch_info: PatchCartInfo) -> CartEntity | None:
         return None
     if patch_info.items is not None:
         carts_data[id].items = patch_info.items
-    # price is derived; ignore direct patch
     recalculated = _recalculate_cart_info(carts_data[id])
     carts_data[id] = recalculated
     return CartEntity(id=id, info=recalculated)
@@ -99,7 +98,6 @@ def add_item(cart_id: int, item_id: int) -> CartEntity | None:
     if cart_id not in carts_data:
         return None
     existing = carts_data[cart_id]
-    # fetch item to get current name; if not found or deleted, still add but available False
     item_entity = item_queries.get_one(item_id)
     name = item_entity.info.name if item_entity is not None else f"item-{item_id}"
     for it in existing.items:

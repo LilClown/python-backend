@@ -67,7 +67,6 @@ async def get_cart_by_id(id: int) -> CartResponse:
 async def post_cart(response: Response) -> dict[str, int]:
     entity = store.add_empty()
 
-    # as REST states one should provide uri to newly created resource in location header
     response.headers["location"] = f"/cart/{entity.id}"
     return {"id": entity.id}
 

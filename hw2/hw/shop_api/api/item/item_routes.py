@@ -65,7 +65,6 @@ async def get_item_by_id(id: int) -> ItemResponse:
 async def post_item(info: ItemRequest, response: Response) -> ItemResponse:
     entity = store.add(info.as_item_info())
 
-    # as REST states one should provide uri to newly created resource in location header
     response.headers["location"] = f"/item/{entity.id}"
 
     return ItemResponse.from_entity(entity)
