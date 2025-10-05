@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from fastapi import FastAPI, APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, NonNegativeFloat
 
+from fastapi import WebSocket, WebSocketDisconnect
+from uuid import uuid4
 
 # id generator
 def _int_id_generator() -> Iterable[int]:
@@ -341,6 +343,42 @@ class PatchCartRequest(BaseModel):
             price=self.price,
         )
 
+# char room manager
+class ChatRoomManager:
+    def __init__(self) -> None:
+        self.rooms: dict[str, set[WebSocket]] = {}
+
+    async def connect(self, chat_name: str, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.rooms.setdefault(chat_name, set()).add(websocket)
+
+    def disconnect(self, chat_name: str, websocket: WebSocket) -> None:
+        room = self.rooms.get(chat_name)
+        if not room:
+            return
+        if websocket in room:
+            room.remove(websocket)
+        if not room:
+            self.rooms.pop(chat_name, None)
+
+    async def broadcast(self, chat_name: str, message: str, exclude: WebSocket | None = None) -> None:
+        room = self.rooms.get(chat_name)
+        if not room:
+            return
+        for ws in list(room):
+            if exclude is not None and ws is exclude:
+                continue
+            try:
+                await ws.send_text(message)
+            except Exception:
+                if ws in room:
+                    room.remove(ws)
+
+chat_manager = ChatRoomManager()
+
+# generate username
+def generate_username() -> str:
+    return f"user-{uuid4().hex[:8]}"
 
 # item router
 item_router = APIRouter(prefix="/item")
@@ -522,3 +560,16 @@ async def add_item(cart_id: int, item_id: int) -> Response:
 app = FastAPI(title="Shop API")
 app.include_router(cart_router)
 app.include_router(item_router)
+
+
+# websocket chat
+@app.websocket("/chat/{chat_name}")
+async def websocket_chat(websocket: WebSocket, chat_name: str) -> None:
+    username = generate_username()
+    await chat_manager.connect(chat_name, websocket)
+    try:
+        while True:
+            text = await websocket.receive_text()
+            await chat_manager.broadcast(chat_name, f"{username} :: {text}", exclude=websocket)
+    except WebSocketDisconnect:
+        chat_manager.disconnect(chat_name, websocket)
