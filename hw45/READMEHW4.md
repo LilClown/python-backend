@@ -16,8 +16,14 @@
 
 Скрипты для демонстрации уровней изоляции находятся в `scripts/`:
 
+	- scripts/dirty_read_read_committed.py — отсутствие dirty read при READ COMMITTED (в PostgreSQL READ UNCOMMITTED не поддерживается)
 	- scripts/non_repeatable_read_read_committed.py — non-repeatable read при READ COMMITTED
+	- scripts/non_repeatable_read_repeatable_read_no.py — отсутствие non-repeatable read при REPEATABLE READ
 	- scripts/phantom_read_read_committed.py — phantom read при READ COMMITTED
 	- scripts/serializable_no_phantom.py — отсутствие phantom read при SERIALIZABLE (возможен serialization error при коммите)
 
-Примечание: в PostgreSQL уровень READ UNCOMMITTED обрабатывается как READ COMMITTED, поэтому dirty read воспроизвести нельзя. 
+Моменты по PostgreSQL:
+- Уровень READ UNCOMMITTED обрабатывается как READ COMMITTED, поэтому dirty read воспроизвести нельзя; соответствующий скрипт демонстрирует именно отсутствие грязного чтения.
+- На уровне REPEATABLE READ PostgreSQL использует snapshot isolation — фантомные чтения отсутствуют. Фантомы показаны на READ COMMITTED, а отсутствие фантомов — на SERIALIZABLE.
+
+Подробный разбор результатов запусков см. в `scripts/report.md`.

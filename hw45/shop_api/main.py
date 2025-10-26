@@ -114,6 +114,8 @@ def item_add(info: ItemInfo) -> ItemEntity:
         orm = ItemOrm(name=info.name, price=Decimal(str(info.price)), deleted=info.deleted)
         session.add(orm)
         session.flush()
+        # Refresh to ensure DB-side numeric scale (e.g., 2 decimals) is reflected
+        session.refresh(orm)
         return _to_item_entity(orm)
 
 
@@ -161,6 +163,7 @@ def item_update(id: int, info: ItemInfo) -> ItemEntity | None:
         orm.price = Decimal(str(info.price))
         orm.deleted = info.deleted
         session.flush()
+        session.refresh(orm)
         return _to_item_entity(orm)
 
 
@@ -175,6 +178,7 @@ def item_upsert(id: int, info: ItemInfo) -> ItemEntity:
             orm.price = Decimal(str(info.price))
             orm.deleted = info.deleted
         session.flush()
+        session.refresh(orm)
         return _to_item_entity(orm)
 
 
@@ -188,6 +192,7 @@ def item_patch(id: int, patch_info: PatchItemInfo) -> ItemEntity | None:
         if patch_info.price is not None:
             orm.price = Decimal(str(patch_info.price))
         session.flush()
+        session.refresh(orm)
         return _to_item_entity(orm)
 
 
@@ -273,7 +278,10 @@ def cart_get_many(
     max_quantity: int | None = None,
 ) -> Iterable[CartEntity]:
     with SessionLocal() as session:
-        cart_ids = [c.id for c in session.execute(select(CartOrm.id).offset(offset).limit(limit)).scalars().all()]
+        # scalars().all() returns list[int] of ids already
+        cart_ids = session.execute(
+            select(CartOrm.id).offset(offset).limit(limit)
+        ).scalars().all()
         for cid in cart_ids:
             info = _cart_recalculate_by_id(session, cid)
             total_quantity = sum(i.quantity for i in info.items)

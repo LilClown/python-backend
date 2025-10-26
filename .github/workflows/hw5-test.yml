@@ -1,0 +1,57 @@
+name: HW5 Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['hw45/**']
+  push:
+    branches: [main]
+    paths: ['hw45/**']
+
+jobs:
+  test-hw5:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: shop
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shop"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        working-directory: hw45
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pytest with coverage (>=95%)
+        working-directory: hw45
+        env:
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/shop
+          PYTHONPATH: ${{ github.workspace }}/hw45
+        run: |
+          pytest -vv tests \
+            --cov=shop_api \
+            --cov-report=term-missing \
+            --cov-fail-under=95
