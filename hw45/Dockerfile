@@ -7,16 +7,13 @@ ARG PYTHONFAULTHANDLER=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=on \
     PIP_DEFAULT_TIMEOUT=500
 
-RUN apt-get update && apt-get install -y gcc
+RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
 RUN python -m pip install --upgrade pip
 
-WORKDIR $APP_ROOT/src
-COPY . ./
-
-ENV VIRTUAL_ENV=$APP_ROOT/src/.venv \
-    PATH=$APP_ROOT/src/.venv/bin:$PATH
-
-RUN pip install -r requirements.txt
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt
+COPY . /app
 
 FROM base as local
 

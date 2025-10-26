@@ -13,3 +13,11 @@
 показать  phantom reads при repeatable read
 показать что нет phantom reads при serializable
 *Тут зависит от того какую БД вы выбрали, разные БД могут поддерживать разные уровни изоляции
+
+Скрипты для демонстрации уровней изоляции находятся в `scripts/`:
+
+	- scripts/non_repeatable_read_read_committed.py — non-repeatable read при READ COMMITTED
+	- scripts/phantom_read_read_committed.py — phantom read при READ COMMITTED
+	- scripts/serializable_no_phantom.py — отсутствие phantom read при SERIALIZABLE (возможен serialization error при коммите)
+
+Примечание: в PostgreSQL уровень READ UNCOMMITTED обрабатывается как READ COMMITTED, поэтому dirty read воспроизвести нельзя. 
