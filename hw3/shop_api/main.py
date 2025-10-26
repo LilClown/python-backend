@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, NonNega
 from fastapi import WebSocket, WebSocketDisconnect
 from uuid import uuid4
 
+from prometheus_fastapi_instrumentator import Instrumentator
+
 # id generator
 def _int_id_generator() -> Iterable[int]:
     i = 0
@@ -560,7 +562,7 @@ async def add_item(cart_id: int, item_id: int) -> Response:
 app = FastAPI(title="Shop API")
 app.include_router(cart_router)
 app.include_router(item_router)
-
+Instrumentator().instrument(app).expose(app)
 
 # websocket chat
 @app.websocket("/chat/{chat_name}")

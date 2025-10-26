@@ -7,8 +7,68 @@ from dataclasses import dataclass
 from fastapi import FastAPI, APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, NonNegativeFloat
 
-from fastapi import WebSocket, WebSocketDisconnect
-from uuid import uuid4
+
+import os
+from decimal import Decimal
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Boolean,
+    Numeric,
+    ForeignKey,
+    select,
+    func,
+    update as sa_update,
+)
+from sqlalchemy.orm import declarative_base, relationship, Session, sessionmaker
+
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@localhost:5432/shop",
+)
+
+engine = create_engine(DATABASE_URL, future=True)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+Base = declarative_base()
+
+
+class ItemOrm(Base):
+    __tablename__ = "items"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    price = Column(Numeric(12, 2), nullable=False)
+    deleted = Column(Boolean, nullable=False, default=False)
+    cart_items = relationship("CartItemOrm", back_populates="item", cascade="all, delete-orphan")
+
+
+class CartOrm(Base):
+    __tablename__ = "carts"
+    id = Column(Integer, primary_key=True)
+    items = relationship("CartItemOrm", back_populates="cart", cascade="all, delete-orphan")
+
+
+class CartItemOrm(Base):
+    __tablename__ = "cart_items"
+    cart_id = Column(Integer, ForeignKey("carts.id", ondelete="CASCADE"), primary_key=True)
+    item_id = Column(Integer, ForeignKey("items.id", ondelete="RESTRICT"), primary_key=True)
+    quantity = Column(Integer, nullable=False, default=1)
+
+    cart = relationship("CartOrm", back_populates="items")
+    item = relationship("ItemOrm", back_populates="cart_items")
+
+
+def init_db() -> None:
+    import time
+    for attempt in range(30):
+        try:
+            Base.metadata.create_all(bind=engine)
+            return
+        except Exception:
+            time.sleep(1)
+
 
 # id generator
 def _int_id_generator() -> Iterable[int]:
@@ -41,26 +101,37 @@ class PatchItemInfo:
     price: float | None = None
 
 
-# item store
-_items_data: dict[int, ItemInfo] = {}
+# item store (DB-backed)
+def _to_item_entity(orm: ItemOrm) -> ItemEntity:
+    return ItemEntity(
+        id=orm.id,
+        info=ItemInfo(name=orm.name, price=float(orm.price), deleted=bool(orm.deleted)),
+    )
 
 
 def item_add(info: ItemInfo) -> ItemEntity:
-    _id = next(id_generator)
-    _items_data[_id] = info
-    return ItemEntity(_id, info)
+    with SessionLocal.begin() as session:
+        orm = ItemOrm(name=info.name, price=Decimal(str(info.price)), deleted=info.deleted)
+        session.add(orm)
+        session.flush()
+        # Refresh to ensure DB-side numeric scale (e.g., 2 decimals) is reflected
+        session.refresh(orm)
+        return _to_item_entity(orm)
 
 
 def item_delete(id: int) -> None:
-    if id in _items_data:
-        _items_data[id].deleted = True
+    with SessionLocal.begin() as session:
+        session.execute(
+            sa_update(ItemOrm).where(ItemOrm.id == id).values(deleted=True)
+        )
 
 
 def item_get_one(id: int) -> ItemEntity | None:
-    info = _items_data.get(id)
-    if info is None or info.deleted:
-        return None
-    return ItemEntity(id=id, info=info)
+    with SessionLocal() as session:
+        orm = session.get(ItemOrm, id)
+        if orm is None or orm.deleted:
+            return None
+        return _to_item_entity(orm)
 
 
 def item_get_many(
@@ -70,39 +141,59 @@ def item_get_many(
     max_price: float | None = None,
     show_deleted: bool = False,
 ) -> Iterable[ItemEntity]:
-    curr = 0
-    for _id, info in _items_data.items():
-        if (not show_deleted) and info.deleted:
-            continue
-        if min_price is not None and info.price < min_price:
-            continue
-        if max_price is not None and info.price > max_price:
-            continue
-        if offset <= curr < offset + limit:
-            yield ItemEntity(_id, info)
-        curr += 1
+    with SessionLocal() as session:
+        stmt = select(ItemOrm)
+        if not show_deleted:
+            stmt = stmt.where(ItemOrm.deleted.is_(False))
+        if min_price is not None:
+            stmt = stmt.where(ItemOrm.price >= Decimal(str(min_price)))
+        if max_price is not None:
+            stmt = stmt.where(ItemOrm.price <= Decimal(str(max_price)))
+        stmt = stmt.offset(offset).limit(limit)
+        for orm in session.execute(stmt).scalars().all():
+            yield _to_item_entity(orm)
 
 
 def item_update(id: int, info: ItemInfo) -> ItemEntity | None:
-    if id not in _items_data or _items_data[id].deleted:
-        return None
-    _items_data[id] = info
-    return ItemEntity(id=id, info=info)
+    with SessionLocal.begin() as session:
+        orm = session.get(ItemOrm, id, with_for_update=False)
+        if orm is None or orm.deleted:
+            return None
+        orm.name = info.name
+        orm.price = Decimal(str(info.price))
+        orm.deleted = info.deleted
+        session.flush()
+        session.refresh(orm)
+        return _to_item_entity(orm)
 
 
 def item_upsert(id: int, info: ItemInfo) -> ItemEntity:
-    _items_data[id] = info
-    return ItemEntity(id=id, info=info)
+    with SessionLocal.begin() as session:
+        orm = session.get(ItemOrm, id)
+        if orm is None:
+            orm = ItemOrm(id=id, name=info.name, price=Decimal(str(info.price)), deleted=info.deleted)
+            session.add(orm)
+        else:
+            orm.name = info.name
+            orm.price = Decimal(str(info.price))
+            orm.deleted = info.deleted
+        session.flush()
+        session.refresh(orm)
+        return _to_item_entity(orm)
 
 
 def item_patch(id: int, patch_info: PatchItemInfo) -> ItemEntity | None:
-    if id not in _items_data or _items_data[id].deleted:
-        return None
-    if patch_info.name is not None:
-        _items_data[id].name = patch_info.name
-    if patch_info.price is not None:
-        _items_data[id].price = patch_info.price
-    return ItemEntity(id=id, info=_items_data[id])
+    with SessionLocal.begin() as session:
+        orm = session.get(ItemOrm, id)
+        if orm is None or orm.deleted:
+            return None
+        if patch_info.name is not None:
+            orm.name = patch_info.name
+        if patch_info.price is not None:
+            orm.price = Decimal(str(patch_info.price))
+        session.flush()
+        session.refresh(orm)
+        return _to_item_entity(orm)
 
 
 # cart models
@@ -132,35 +223,50 @@ class PatchCartInfo:
     price: float | None = None
 
 
-# cart store
-_carts_data: dict[int, CartInfo] = {}
+def _cart_recalculate_by_id(session: Session, cart_id: int) -> CartInfo:
+    rows = session.execute(
+        select(
+            CartItemOrm.item_id,
+            CartItemOrm.quantity,
+            ItemOrm.name,
+            ItemOrm.deleted,
+            ItemOrm.price,
+        ).join(ItemOrm, CartItemOrm.item_id == ItemOrm.id)
+        .where(CartItemOrm.cart_id == cart_id)
+    ).all()
+    items: list[CartItemInfo] = []
+    total_price: Decimal = Decimal("0.0")
+    for item_id, quantity, name, deleted, price in rows:
+        available = not bool(deleted)
+        if available:
+            total_price += (price or Decimal("0")) * quantity
+        items.append(
+            CartItemInfo(
+                id=item_id,
+                name=name,
+                quantity=quantity,
+                available=available,
+            )
+        )
+    return CartInfo(items=items, price=float(total_price))
 
 
 def cart_add_empty() -> CartEntity:
-    _id = next(id_generator)
-    _carts_data[_id] = CartInfo(items=[], price=0.0)
-    return CartEntity(_id, _carts_data[_id])
-
-
-def _cart_recalculate(info: CartInfo) -> CartInfo:
-    total_price = 0.0
-    new_items: list[CartItemInfo] = []
-    for it in info.items:
-        entity = item_get_one(it.id)
-        available = entity is not None
-        name = entity.info.name if entity is not None else it.name
-        price = entity.info.price if entity is not None else 0.0
-        if available:
-            total_price += price * it.quantity
-        new_items.append(CartItemInfo(id=it.id, name=name, quantity=it.quantity, available=available))
-    return CartInfo(items=new_items, price=total_price)
+    with SessionLocal.begin() as session:
+        cart = CartOrm()
+        session.add(cart)
+        session.flush()
+        info = CartInfo(items=[], price=0.0)
+        return CartEntity(cart.id, info)
 
 
 def cart_get_one(id: int) -> CartEntity | None:
-    if id not in _carts_data:
-        return None
-    recalculated = _cart_recalculate(_carts_data[id])
-    return CartEntity(id=id, info=recalculated)
+    with SessionLocal() as session:
+        cart = session.get(CartOrm, id)
+        if cart is None:
+            return None
+        info = _cart_recalculate_by_id(session, id)
+        return CartEntity(id=id, info=info)
 
 
 def cart_get_many(
@@ -171,62 +277,80 @@ def cart_get_many(
     min_quantity: int | None = None,
     max_quantity: int | None = None,
 ) -> Iterable[CartEntity]:
-    curr = 0
-    for _id, info in _carts_data.items():
-        recalculated = _cart_recalculate(info)
-        total_quantity = sum(i.quantity for i in recalculated.items)
-        if min_price is not None and recalculated.price < min_price:
-            continue
-        if max_price is not None and recalculated.price > max_price:
-            continue
-        if min_quantity is not None and total_quantity < min_quantity:
-            continue
-        if max_quantity is not None and total_quantity > max_quantity:
-            continue
-        if offset <= curr < offset + limit:
-            yield CartEntity(_id, recalculated)
-        curr += 1
+    with SessionLocal() as session:
+        # scalars().all() returns list[int] of ids already
+        cart_ids = session.execute(
+            select(CartOrm.id).offset(offset).limit(limit)
+        ).scalars().all()
+        for cid in cart_ids:
+            info = _cart_recalculate_by_id(session, cid)
+            total_quantity = sum(i.quantity for i in info.items)
+            if min_price is not None and info.price < min_price:
+                continue
+            if max_price is not None and info.price > max_price:
+                continue
+            if min_quantity is not None and total_quantity < min_quantity:
+                continue
+            if max_quantity is not None and total_quantity > max_quantity:
+                continue
+            yield CartEntity(cid, info)
+
+
+def _cart_set_items(session: Session, cart_id: int, items: List[CartItemInfo]) -> None:
+    session.query(CartItemOrm).filter(CartItemOrm.cart_id == cart_id).delete()
+    for it in items:
+        session.add(CartItemOrm(cart_id=cart_id, item_id=it.id, quantity=it.quantity))
 
 
 def cart_update(id: int, info: CartInfo) -> CartEntity | None:
-    if id not in _carts_data:
-        return None
-    _carts_data[id] = info
-    return CartEntity(id=id, info=info)
+    with SessionLocal.begin() as session:
+        cart = session.get(CartOrm, id)
+        if cart is None:
+            return None
+        _cart_set_items(session, id, info.items)
+        session.flush()
+        recalculated = _cart_recalculate_by_id(session, id)
+        return CartEntity(id=id, info=recalculated)
 
 
 def cart_upsert(id: int, info: CartInfo) -> CartEntity:
-    _carts_data[id] = info
-    return CartEntity(id=id, info=info)
+    with SessionLocal.begin() as session:
+        cart = session.get(CartOrm, id)
+        if cart is None:
+            cart = CartOrm(id=id)
+            session.add(cart)
+            session.flush()
+        _cart_set_items(session, id, info.items)
+        session.flush()
+        recalculated = _cart_recalculate_by_id(session, id)
+        return CartEntity(id=id, info=recalculated)
 
 
 def cart_patch(id: int, patch_info: PatchCartInfo) -> CartEntity | None:
-    if id not in _carts_data:
-        return None
-    if patch_info.items is not None:
-        _carts_data[id].items = patch_info.items
-    recalculated = _cart_recalculate(_carts_data[id])
-    _carts_data[id] = recalculated
-    return CartEntity(id=id, info=recalculated)
+    with SessionLocal.begin() as session:
+        cart = session.get(CartOrm, id)
+        if cart is None:
+            return None
+        if patch_info.items is not None:
+            _cart_set_items(session, id, patch_info.items)
+        session.flush()
+        recalculated = _cart_recalculate_by_id(session, id)
+        return CartEntity(id=id, info=recalculated)
 
 
 def cart_add_item(cart_id: int, item_id: int) -> CartEntity | None:
-    if cart_id not in _carts_data:
-        return None
-    existing = _carts_data[cart_id]
-    item_entity = item_get_one(item_id)
-    name = item_entity.info.name if item_entity is not None else f"item-{item_id}"
-    for it in existing.items:
-        if it.id == item_id:
-            it.quantity += 1
-            break
-    else:
-        existing.items.append(
-            CartItemInfo(id=item_id, name=name, quantity=1, available=item_entity is not None)
-        )
-    recalculated = _cart_recalculate(existing)
-    _carts_data[cart_id] = recalculated
-    return CartEntity(id=cart_id, info=recalculated)
+    with SessionLocal.begin() as session:
+        cart = session.get(CartOrm, cart_id)
+        if cart is None:
+            return None
+        ci = session.get(CartItemOrm, {"cart_id": cart_id, "item_id": item_id})
+        if ci is None:
+            session.add(CartItemOrm(cart_id=cart_id, item_id=item_id, quantity=1))
+        else:
+            ci.quantity += 1
+        session.flush()
+        recalculated = _cart_recalculate_by_id(session, cart_id)
+        return CartEntity(id=cart_id, info=recalculated)
 
 
 # item contracts
@@ -343,42 +467,6 @@ class PatchCartRequest(BaseModel):
             price=self.price,
         )
 
-# char room manager
-class ChatRoomManager:
-    def __init__(self) -> None:
-        self.rooms: dict[str, set[WebSocket]] = {}
-
-    async def connect(self, chat_name: str, websocket: WebSocket) -> None:
-        await websocket.accept()
-        self.rooms.setdefault(chat_name, set()).add(websocket)
-
-    def disconnect(self, chat_name: str, websocket: WebSocket) -> None:
-        room = self.rooms.get(chat_name)
-        if not room:
-            return
-        if websocket in room:
-            room.remove(websocket)
-        if not room:
-            self.rooms.pop(chat_name, None)
-
-    async def broadcast(self, chat_name: str, message: str, exclude: WebSocket | None = None) -> None:
-        room = self.rooms.get(chat_name)
-        if not room:
-            return
-        for ws in list(room):
-            if exclude is not None and ws is exclude:
-                continue
-            try:
-                await ws.send_text(message)
-            except Exception:
-                if ws in room:
-                    room.remove(ws)
-
-chat_manager = ChatRoomManager()
-
-# generate username
-def generate_username() -> str:
-    return f"user-{uuid4().hex[:8]}"
 
 # item router
 item_router = APIRouter(prefix="/item")
@@ -558,18 +646,10 @@ async def add_item(cart_id: int, item_id: int) -> Response:
 
 # app
 app = FastAPI(title="Shop API")
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    init_db()
 app.include_router(cart_router)
 app.include_router(item_router)
-
-
-# websocket chat
-@app.websocket("/chat/{chat_name}")
-async def websocket_chat(websocket: WebSocket, chat_name: str) -> None:
-    username = generate_username()
-    await chat_manager.connect(chat_name, websocket)
-    try:
-        while True:
-            text = await websocket.receive_text()
-            await chat_manager.broadcast(chat_name, f"{username} :: {text}", exclude=websocket)
-    except WebSocketDisconnect:
-        chat_manager.disconnect(chat_name, websocket)
